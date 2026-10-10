@@ -1,0 +1,11 @@
+# Build output and local tools
+/build/
+/build-release/
+/dist/
+/.venv/
+__pycache__/
+*.pyc
+
+# Ghidra project and decompiled game code: derived from the copyrighted game,
+# never published. Rebuild it locally (see CLAUDE.md).
+/ghidra/
