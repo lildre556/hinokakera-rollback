@@ -11,20 +11,18 @@
 #include "log.h"
 #include "stun.h"
 
-#define BUILD_ID "hinoroll-1"
+#define BUILD_ID "hinoroll-ce1"
 #define PROTOCOL 1
 #define DEFAULT_PORT 7000
 #define PKT_MAGIC 0x4c524e48u  // "HNRL" (shared with netplay.c, which ignores these late packets)
 #define PKT_HELLO 2
 
-// The host's settings that must match (the old netvs sent the same, plus the
-// effects level, which decides which effects battle logic spawns).
+// The host's settings that must match (config words, see game.h): texture,
+// visual/field effects (they decide which effects battle logic spawns), COM
+// level, speed, win count, time, cut-in and blood. Window, FPS, volume and keys stay each player's own.
 static const unsigned synced_fields[] = {
-    0x2adc4,  // logic ticks per second (also APP_FPS)
-    0x2adc8,  // effects
-    0x2addc, 0x2ade0, 0x2ade4, 0x2ade8,  // speed, COM level, life, win count
-    0x2b8c4, 0x2b8c8, 0x2b8cc,           // last picked characters and stage
-    0x2b8fc, 0x2b900, 0x2b904, 0x2b908,
+    APP_CONFIG + 5 * 4, APP_CONFIG + 6 * 4, APP_CONFIG + 7 * 4, APP_CONFIG + 10 * 4, APP_CONFIG + 11 * 4,
+    APP_CONFIG + 12 * 4, APP_CONFIG + 13 * 4, APP_CONFIG + 14 * 4, APP_CONFIG + 15 * 4,
 };
 #define SYNCED (int)(sizeof synced_fields / sizeof synced_fields[0])
 
@@ -222,7 +220,6 @@ static void apply_host_config(void *app, const uint32_t *config) {
     for (int i = 0; i < SYNCED; i++) {
         APP_U32(app, synced_fields[i]) = config[i];
     }
-    APP_U32(app, APP_FPS) = APP_U32(app, 0x2adc4);
 }
 
 static void finish(Conn *c, void *app, int delay_setting) {
@@ -482,7 +479,12 @@ static bool dialog(void *app) {
     RegisterClassA(&wc);
     RECT r = {0, 0, 520, 270};
     AdjustWindowRect(&r, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE);
-    d.wnd = CreateWindowExA(WS_EX_TOPMOST, "HinorollNetplay", "Hinokakera netplay (GGPO rollback)",
+#ifdef HINOROLL_HARNESS
+    DWORD ex = 0;  // test builds stay out of the way (tools/dev/dialog_connect.py drives the window)
+#else
+    DWORD ex = WS_EX_TOPMOST;
+#endif
+    d.wnd = CreateWindowExA(ex, "HinorollNetplay", "Hinokakera netplay (GGPO rollback)",
                             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left,
                             r.bottom - r.top, NULL, NULL, wc.hInstance, NULL);
     add("STATIC", "Your code - send it to your opponent:", 0, 12, 12, 480, 18, 0);
@@ -509,8 +511,13 @@ static bool dialog(void *app) {
     CheckRadioButton(d.wnd, ID_P1, ID_P2, ini_int("player", 1) == 2 ? ID_P2 : ID_P1);
     int delay = ini_int("delay", -1);
     SendMessageA(combo, CB_SETCURSEL, delay < 0 || delay > 4 ? 0 : delay + 1, 0);
+#ifdef HINOROLL_HARNESS
+    ShowWindow(d.wnd, SW_SHOWNOACTIVATE);
+    SetWindowPos(d.wnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+#else
     ShowWindow(d.wnd, SW_SHOW);
     SetForegroundWindow(d.wnd);
+#endif
 
     while (!d.offline) {
         MSG m;

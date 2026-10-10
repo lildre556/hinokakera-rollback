@@ -33,8 +33,8 @@ static void heap_fail(const char *what, const void *p);
 #include "dlmalloc.c"
 #pragma GCC diagnostic pop
 
-#define MAIN_ARENA_MB 384
-#define BATTLE_ARENA_MB 192
+#define MAIN_ARENA_MB 256
+#define BATTLE_ARENA_MB 128
 
 static mspace ms_main, ms_battle;
 static uint8_t *main_base, *battle_base;
@@ -45,18 +45,24 @@ static int route_stack[16];
 static CRITICAL_SECTION heap_lock;
 static HeapStats stats;
 
-typedef void *(__cdecl *heap_alloc_fn)(size_t);
-typedef void(__cdecl *free_fn)(void *);
-typedef void *(__cdecl *realloc_fn)(void *, size_t);
-typedef void *(__cdecl *calloc_fn)(size_t, size_t);
-typedef size_t(__cdecl *msize_fn)(void *);
-typedef void *(__cdecl *expand_fn)(void *, size_t);
-static heap_alloc_fn orig_heap_alloc;
-static free_fn orig_free;
-static realloc_fn orig_realloc;
-static calloc_fn orig_calloc;
-static msize_fn orig_msize;
-static expand_fn orig_expand;
+// The game links the static debug C runtime: every allocation goes through
+// _nh_malloc_dbg (malloc, calloc, new, _malloc_dbg), every free through
+// _free_dbg, and so on; those five are replaced.
+typedef void *(__cdecl *nh_malloc_dbg_fn)(size_t, int, int, const char *, int);
+typedef void(__cdecl *free_dbg_fn)(void *, int);
+typedef void *(__cdecl *realloc_dbg_fn)(void *, size_t, int, const char *, int);
+typedef size_t(__cdecl *msize_dbg_fn)(void *, int);
+typedef void *(__cdecl *expand_dbg_fn)(void *, size_t, int, const char *, int);
+static nh_malloc_dbg_fn orig_nh_malloc_dbg;
+static free_dbg_fn orig_free_dbg;
+static realloc_dbg_fn orig_realloc_dbg;
+static msize_dbg_fn orig_msize_dbg;
+static expand_dbg_fn orig_expand_dbg;
+
+// The debug runtime fills new blocks with 0xcd; keep doing that, so code that
+// reads memory it never wrote sees the same bytes it always did (and the same
+// bytes on every machine and every re-run).
+#define FILL_NEW 0xcd
 
 static void heap_fail(const char *what, const void *p) {
     log_printf("heap: %s (%p) - crashing on purpose", what, p);
@@ -148,14 +154,14 @@ static void scan_stack(uintptr_t out[4]) {
             break;
         }
         v = sp[i];
-        if (v < 0x401006 || v >= 0x4ba2d4) {
+        if (v < IMAGE_TEXT_START + 6 || v >= IMAGE_TEXT_END) {
             continue;
         }
         const uint8_t *c = (const uint8_t *)v;
         if (c[-5] == 0xe8 || (c[-2] == 0xff && (c[-1] & 0x38) == 0x10) || (c[-3] == 0xff && (c[-2] & 0x38) == 0x10) ||
             (c[-6] == 0xff && (c[-5] & 0x38) == 0x10)) {
             // Skip the CRT/operator new wrappers themselves.
-            if (v >= 0x4a0000 && v < 0x4b0000) {
+            if ((v >= 0x4a0000 && v < 0x4bb000) || (v >= 0x4e7600 && v < 0x4e7b00)) {
                 continue;
             }
             out[n++] = v;
@@ -291,7 +297,7 @@ static void count_alloc(mspace m, void *p) {
     site_add(p);
 }
 
-static void *__cdecl hk_heap_alloc(size_t n) {
+static void *alloc(size_t n) {
     if (n == 0) {
         n = 1;
     }
@@ -301,19 +307,25 @@ static void *__cdecl hk_heap_alloc(size_t n) {
     count_alloc(m, p);
     trace('A', p, n);
     LeaveCriticalSection(&heap_lock);
-    if (!p) {
+    if (p) {
+        memset(p, FILL_NEW, n);
+    } else {
         log_printf("heap: out of memory in the %s arena (%u bytes)", m == ms_battle ? "battle" : "main", (unsigned)n);
     }
     return p;
 }
 
-static void __cdecl hk_free(void *p) {
+static void *__cdecl hk_nh_malloc_dbg(size_t n, int nh, int type, const char *file, int line) {
+    return alloc(n);
+}
+
+static void __cdecl hk_free_dbg(void *p, int type) {
     if (!p) {
         return;
     }
     mspace m = owner(p);
     if (!m) {
-        orig_free(p);
+        orig_free_dbg(p, type);
         return;
     }
     EnterCriticalSection(&heap_lock);
@@ -327,23 +339,23 @@ static void __cdecl hk_free(void *p) {
     LeaveCriticalSection(&heap_lock);
 }
 
-static void *__cdecl hk_realloc(void *p, size_t n) {
+static void *__cdecl hk_realloc_dbg(void *p, size_t n, int type, const char *file, int line) {
     if (!p) {
-        return hk_heap_alloc(n);
+        return alloc(n);
     }
     if (n == 0) {
-        hk_free(p);
+        hk_free_dbg(p, type);
         return NULL;
     }
     mspace m = owner(p);
     if (!m) {
-        return orig_realloc(p, n);
+        return orig_realloc_dbg(p, n, type, file, line);
     }
     EnterCriticalSection(&heap_lock);
+    size_t old = mspace_usable_size(p);
     void *q;
     if (m == ms_main && battle_logic()) {
         // Copy into the battle arena and keep the old block.
-        size_t old = mspace_usable_size(p);
         q = mspace_malloc(ms_battle, n);
         if (q) {
             memcpy(q, p, old < n ? old : n);
@@ -357,33 +369,24 @@ static void *__cdecl hk_realloc(void *p, size_t n) {
         site_add(q ? q : p);
     }
     LeaveCriticalSection(&heap_lock);
+    if (q && n > old) {
+        memset((uint8_t *)q + old, FILL_NEW, n - old);
+    }
     return q;
 }
 
-static void *__cdecl hk_calloc(size_t count, size_t size) {
-    if (size && count > (size_t)-1 / size) {
-        return NULL;
-    }
-    size_t n = count * size;
-    void *p = hk_heap_alloc(n ? n : 1);
-    if (p) {
-        memset(p, 0, n);
-    }
-    return p;
-}
-
-static size_t __cdecl hk_msize(void *p) {
+static size_t __cdecl hk_msize_dbg(void *p, int type) {
     mspace m = owner(p);
     if (!m) {
-        return orig_msize(p);
+        return orig_msize_dbg(p, type);
     }
     return mspace_usable_size(p);
 }
 
-static void *__cdecl hk_expand(void *p, size_t n) {
+static void *__cdecl hk_expand_dbg(void *p, size_t n, int type, const char *file, int line) {
     mspace m = owner(p);
     if (!m) {
-        return orig_expand(p, n);
+        return orig_expand_dbg(p, n, type, file, line);
     }
     if (m == ms_main && battle_logic()) {
         return mspace_usable_size(p) >= n ? p : NULL;
@@ -455,12 +458,11 @@ void heap_install(void) {
         log_printf("heap: create_mspace_with_base failed");
         return;
     }
-    bool ok = hook_code(ADDR_HEAP_ALLOC, (void *)hk_heap_alloc, (void **)&orig_heap_alloc, "_heap_alloc") &&
-              hook_code(ADDR_FREE, (void *)hk_free, (void **)&orig_free, "free") &&
-              hook_code(ADDR_REALLOC, (void *)hk_realloc, (void **)&orig_realloc, "realloc") &&
-              hook_code(ADDR_CALLOC, (void *)hk_calloc, (void **)&orig_calloc, "calloc") &&
-              hook_code(ADDR_MSIZE, (void *)hk_msize, (void **)&orig_msize, "_msize") &&
-              hook_code(ADDR_EXPAND, (void *)hk_expand, (void **)&orig_expand, "_expand");
+    bool ok = hook_code(ADDR_NH_MALLOC_DBG, (void *)hk_nh_malloc_dbg, (void **)&orig_nh_malloc_dbg, "_nh_malloc_dbg") &&
+              hook_code(ADDR_FREE_DBG, (void *)hk_free_dbg, (void **)&orig_free_dbg, "_free_dbg") &&
+              hook_code(ADDR_REALLOC_DBG, (void *)hk_realloc_dbg, (void **)&orig_realloc_dbg, "_realloc_dbg") &&
+              hook_code(ADDR_MSIZE_DBG, (void *)hk_msize_dbg, (void **)&orig_msize_dbg, "_msize_dbg") &&
+              hook_code(ADDR_EXPAND_DBG, (void *)hk_expand_dbg, (void **)&orig_expand_dbg, "_expand_dbg");
     log_printf("heap: main arena %p (%u MB), battle arena %p (%u MB)%s", main_base, MAIN_ARENA_MB, battle_base,
                BATTLE_ARENA_MB, ok ? "" : " - HOOKS FAILED");
 }

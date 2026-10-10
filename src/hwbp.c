@@ -8,6 +8,7 @@
 #include <windows.h>
 
 #include "frame.h"
+#include "game.h"
 #include "harness.h"
 #include "log.h"
 
@@ -41,7 +42,7 @@ static LONG CALLBACK veh(EXCEPTION_POINTERS *ep) {
     uintptr_t caller = 0;
     uintptr_t *sp = (uintptr_t *)c->Esp;
     for (int i = 0; i < 16 && !IsBadReadPtr(sp + i, 4); i++) {
-        if (sp[i] >= 0x401000 && sp[i] < 0x4ba2d4) {
+        if (sp[i] >= IMAGE_TEXT_START && sp[i] < IMAGE_TEXT_END) {
             caller = sp[i];
             break;
         }

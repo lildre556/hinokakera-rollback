@@ -1,10 +1,14 @@
-"""Disassemble hinokakera.exe at an address: disasm.py 0x401000 [count]"""
+"""Disassemble hinokakera.exe at an address: disasm.py 0x401000 [count]
+
+The CE build by default; HINO_EXE picks another exe (E:/Hinokakera/vanilla/hinokakera.exe is ver.3.00).
+"""
+import os
 import sys
 
 import capstone
 import pefile
 
-EXE = r"E:\Hinokakera\vanilla\hinokakera.exe"
+EXE = os.environ.get("HINO_EXE", r"E:\Hinokakera\ce_vanilla\hinokakera.exe")
 pe = pefile.PE(EXE, fast_load=True)
 base = pe.OPTIONAL_HEADER.ImageBase
 img = pe.get_memory_mapped_image()

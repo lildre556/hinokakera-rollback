@@ -1,7 +1,7 @@
 #include "d3d.h"
 
 #define COBJMACROS
-#include <d3d8.h>
+#include <d3d9.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <windows.h>
@@ -19,28 +19,29 @@ static void put_u32(FILE *f, unsigned v) {
 }
 
 bool d3d_screenshot(void *device_ptr, const char *path) {
-    IDirect3DDevice8 *dev = device_ptr;
+    IDirect3DDevice9 *dev = device_ptr;
     if (!dev) {
         return false;
     }
-    IDirect3DSurface8 *bb = NULL, *copy = NULL;
+    IDirect3DSurface9 *bb = NULL, *copy = NULL;
     bool ok = false;
-    if (FAILED(IDirect3DDevice8_GetBackBuffer(dev, 0, D3DBACKBUFFER_TYPE_MONO, &bb))) {
+    if (FAILED(IDirect3DDevice9_GetBackBuffer(dev, 0, 0, D3DBACKBUFFER_TYPE_MONO, &bb))) {
         log_printf("shot: GetBackBuffer failed");
         return false;
     }
     D3DSURFACE_DESC desc;
-    IDirect3DSurface8_GetDesc(bb, &desc);
-    if (FAILED(IDirect3DDevice8_CreateImageSurface(dev, desc.Width, desc.Height, desc.Format, &copy))) {
-        log_printf("shot: CreateImageSurface failed (format %d)", desc.Format);
+    IDirect3DSurface9_GetDesc(bb, &desc);
+    if (FAILED(IDirect3DDevice9_CreateOffscreenPlainSurface(dev, desc.Width, desc.Height, desc.Format, D3DPOOL_SYSTEMMEM,
+                                                            &copy, NULL))) {
+        log_printf("shot: CreateOffscreenPlainSurface failed (format %d)", desc.Format);
         goto out;
     }
-    if (FAILED(IDirect3DDevice8_CopyRects(dev, bb, NULL, 0, copy, NULL))) {
-        log_printf("shot: CopyRects failed");
+    if (FAILED(IDirect3DDevice9_GetRenderTargetData(dev, bb, copy))) {
+        log_printf("shot: GetRenderTargetData failed");
         goto out;
     }
     D3DLOCKED_RECT lr;
-    if (FAILED(IDirect3DSurface8_LockRect(copy, &lr, NULL, D3DLOCK_READONLY))) {
+    if (FAILED(IDirect3DSurface9_LockRect(copy, &lr, NULL, D3DLOCK_READONLY))) {
         log_printf("shot: LockRect failed");
         goto out;
     }
@@ -89,13 +90,13 @@ bool d3d_screenshot(void *device_ptr, const char *path) {
         fclose(f);
         ok = true;
     }
-    IDirect3DSurface8_UnlockRect(copy);
+    IDirect3DSurface9_UnlockRect(copy);
 out:
     if (copy) {
-        IDirect3DSurface8_Release(copy);
+        IDirect3DSurface9_Release(copy);
     }
     if (bb) {
-        IDirect3DSurface8_Release(bb);
+        IDirect3DSurface9_Release(bb);
     }
     return ok;
 }

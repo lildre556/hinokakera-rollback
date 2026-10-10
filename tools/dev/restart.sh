@@ -2,7 +2,7 @@
 # Restarts the game in a dev folder and waits until the harness answers.
 #   restart.sh [game_dir] [extra args for hinokakera.exe]
 set -euo pipefail
-DIR="${1:-${HINO_DIR:-/e/Hinokakera/dev}}"
+DIR="${1:-${HINO_DIR:-/e/Hinokakera/ce_dev}}"
 shift || true
 WINPY="$(dirname "$0")/../../.venv/Scripts/python"
 # Close only the instance running from this folder.

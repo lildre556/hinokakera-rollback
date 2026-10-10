@@ -51,7 +51,9 @@ void pads_bind(int player, int action, PadControl c);     // adds (replaces the 
 void pads_clear(int player, int action);
 void pads_reset(int player);
 void pads_control_name(int device, PadControl c, char *out, int n);
-// UI navigation from any controller: bit 0 up, 1 down, 2 left, 3 right, 4 select, 5 back (pressed this frame).
+// UI navigation from any controller: bit 0 up, 1 down, 2 left, 3 right, 4 select, 5 back,
+// 6 previous tab, 7 next tab (pressed this frame / held now).
 unsigned pads_ui_buttons(void);
+unsigned pads_ui_held(void);
 void pads_set_ui_open(bool open);
 bool pads_ui_open(void);

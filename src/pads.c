@@ -16,7 +16,6 @@
 
 #define AXIS_THRESHOLD 500     // of 1000, like the game's own stick reading
 #define CAPTURE_THRESHOLD 650
-#define ADDR_GAME_ENUM_JOYSTICK 0x4355e0u  // the game's EnumDevices callback
 
 enum { DEV_XINPUT, DEV_DINPUT };
 
@@ -338,10 +337,10 @@ static void default_bindings(int player, Profile *pr) {
     pr->binds[ACT_RIGHT][1] = PAD_CONTROL(CTL_AXIS_POS, 0);
     int map[5] = {0, 1, 2, 3, 6};
     void *app = frame_app();
-    uint8_t *input = app ? APP_PTR(app, APP_INPUT) : NULL;
+    uint8_t *input = game_input(app);
     if (input) {
         for (int i = 0; i < 5; i++) {
-            map[i] = *(int32_t *)(input + 0x38c + player * 0x40 + i * 4);
+            map[i] = *(int32_t *)(input + INPUT_PAD_MAP + player * 0x40 + i * 4);
         }
     }
     static const int acts[5] = {ACT_A, ACT_B, ACT_C, ACT_D, ACT_PAUSE};
@@ -699,41 +698,47 @@ PadControl pads_capture_poll(void) {
 }
 
 // ---- menu navigation from any controller ----
+// Navigation bits of one device's state: 0 up, 1 down, 2 left, 3 right,
+// 4 select (A / button 1), 5 back (B / button 2), 6 previous tab (LB / button 5),
+// 7 next tab (RB / button 6).
+static unsigned ui_bits(const Pad *pad, const PadState *s) {
+    unsigned b = 0;
+    if (pad->type == DEV_XINPUT) {
+        b |= (s->buttons[0] || s->axes[1] < -AXIS_THRESHOLD) << 0;
+        b |= (s->buttons[1] || s->axes[1] > AXIS_THRESHOLD) << 1;
+        b |= (s->buttons[2] || s->axes[0] < -AXIS_THRESHOLD) << 2;
+        b |= (s->buttons[3] || s->axes[0] > AXIS_THRESHOLD) << 3;
+        b |= s->buttons[12] << 4;  // A
+        b |= s->buttons[13] << 5;  // B
+        b |= s->buttons[8] << 6;   // LB
+        b |= s->buttons[9] << 7;   // RB
+    } else {
+        b |= (s->pov[0][0] || s->axes[1] < -AXIS_THRESHOLD) << 0;
+        b |= (s->pov[0][1] || s->axes[1] > AXIS_THRESHOLD) << 1;
+        b |= (s->pov[0][2] || s->axes[0] < -AXIS_THRESHOLD) << 2;
+        b |= (s->pov[0][3] || s->axes[0] > AXIS_THRESHOLD) << 3;
+        b |= s->buttons[0] << 4;
+        b |= s->buttons[1] << 5;
+        b |= s->buttons[4] << 6;
+        b |= s->buttons[5] << 7;
+    }
+    return b;
+}
+
 unsigned pads_ui_buttons(void) {
     unsigned pressed = 0;
     for (int d = 0; d < pad_count; d++) {
-        const PadState *s = &pads[d].st, *p = &pads[d].prev;
-        unsigned now = 0, before = 0;
-        if (pads[d].type == DEV_XINPUT) {
-            now |= (s->buttons[0] || s->axes[1] < -AXIS_THRESHOLD) << 0;
-            now |= (s->buttons[1] || s->axes[1] > AXIS_THRESHOLD) << 1;
-            now |= (s->buttons[2] || s->axes[0] < -AXIS_THRESHOLD) << 2;
-            now |= (s->buttons[3] || s->axes[0] > AXIS_THRESHOLD) << 3;
-            now |= s->buttons[12] << 4;  // A
-            now |= s->buttons[13] << 5;  // B
-            before |= (p->buttons[0] || p->axes[1] < -AXIS_THRESHOLD) << 0;
-            before |= (p->buttons[1] || p->axes[1] > AXIS_THRESHOLD) << 1;
-            before |= (p->buttons[2] || p->axes[0] < -AXIS_THRESHOLD) << 2;
-            before |= (p->buttons[3] || p->axes[0] > AXIS_THRESHOLD) << 3;
-            before |= p->buttons[12] << 4;
-            before |= p->buttons[13] << 5;
-        } else {
-            now |= (s->pov[0][0] || s->axes[1] < -AXIS_THRESHOLD) << 0;
-            now |= (s->pov[0][1] || s->axes[1] > AXIS_THRESHOLD) << 1;
-            now |= (s->pov[0][2] || s->axes[0] < -AXIS_THRESHOLD) << 2;
-            now |= (s->pov[0][3] || s->axes[0] > AXIS_THRESHOLD) << 3;
-            now |= s->buttons[0] << 4;
-            now |= s->buttons[1] << 5;
-            before |= (p->pov[0][0] || p->axes[1] < -AXIS_THRESHOLD) << 0;
-            before |= (p->pov[0][1] || p->axes[1] > AXIS_THRESHOLD) << 1;
-            before |= (p->pov[0][2] || p->axes[0] < -AXIS_THRESHOLD) << 2;
-            before |= (p->pov[0][3] || p->axes[0] > AXIS_THRESHOLD) << 3;
-            before |= p->buttons[0] << 4;
-            before |= p->buttons[1] << 5;
-        }
-        pressed |= now & ~before;
+        pressed |= ui_bits(&pads[d], &pads[d].st) & ~ui_bits(&pads[d], &pads[d].prev);
     }
     return pressed;
+}
+
+unsigned pads_ui_held(void) {
+    unsigned held = 0;
+    for (int d = 0; d < pad_count; d++) {
+        held |= ui_bits(&pads[d], &pads[d].st);
+    }
+    return held;
 }
 
 void pads_set_ui_open(bool open) {

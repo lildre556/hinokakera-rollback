@@ -16,23 +16,21 @@
 #include "heap.h"
 #include "log.h"
 
-#define APP_SIZE 0x2b9b4u
-
 typedef struct {
     const char *name;
     uint8_t *base;
     size_t size;
     uint8_t *before;
-    uint16_t *logic;   // ticks that changed each byte
-    uint16_t *render;  // renders that changed each byte
+    uint8_t *logic;   // ticks that changed each byte (saturating)
+    uint8_t *render;  // renders that changed each byte
 } Area;
 
-enum { AREA_DATA, AREA_DATA1, AREA_APP, AREA_MAIN, AREA_BATTLE, AREA_COUNT };
+enum { AREA_DATA, AREA_APP, AREA_MAIN, AREA_BATTLE, AREA_COUNT };
 static Area areas[AREA_COUNT];
 static bool on, all_modes;
 static unsigned logic_ticks, renders;
 
-static void area_setup(Area *a, const char *name, void *base, size_t size) {
+static bool area_setup(Area *a, const char *name, void *base, size_t size) {
     free(a->before);
     free(a->logic);
     free(a->render);
@@ -40,8 +38,18 @@ static void area_setup(Area *a, const char *name, void *base, size_t size) {
     a->base = base;
     a->size = size;
     a->before = malloc(size);
-    a->logic = calloc(size, sizeof(uint16_t));
-    a->render = calloc(size, sizeof(uint16_t));
+    a->logic = calloc(size, 1);
+    a->render = calloc(size, 1);
+    if (!a->before || !a->logic || !a->render) {
+        free(a->before);
+        free(a->logic);
+        free(a->render);
+        a->before = a->logic = a->render = NULL;
+        a->base = NULL;
+        log_printf("ww: no memory for the %s area (%u KB)", name, (unsigned)(size >> 10));
+        return false;
+    }
+    return true;
 }
 
 static void observe(bool after, bool render) {
@@ -65,14 +73,14 @@ static void observe(bool after, bool render) {
             memcpy(a->before, a->base, a->size);
             continue;
         }
-        uint16_t *counts = render ? a->render : a->logic;
+        uint8_t *counts = render ? a->render : a->logic;
         const uint32_t *b = (const uint32_t *)a->before, *n = (const uint32_t *)a->base;
         size_t words = a->size / 4;
         for (size_t w = 0; w < words; w++) {
             if (b[w] != n[w]) {
                 for (int k = 0; k < 4; k++) {
                     size_t off = w * 4 + k;
-                    if (a->before[off] != a->base[off] && counts[off] < 0xffff) {
+                    if (a->before[off] != a->base[off] && counts[off] < 0xff) {
                         counts[off]++;
                     }
                 }
@@ -95,7 +103,6 @@ static void start(bool all) {
         return;
     }
     area_setup(&areas[AREA_DATA], ".data", (void *)IMAGE_DATA_START, IMAGE_DATA_END - IMAGE_DATA_START);
-    area_setup(&areas[AREA_DATA1], ".data1", (void *)IMAGE_DATA1_START, IMAGE_DATA1_END - IMAGE_DATA1_START);
     area_setup(&areas[AREA_APP], "app", app, APP_SIZE);
     HeapRegion m = heap_main_region();
     area_setup(&areas[AREA_MAIN], "main", m.base, heap_main_extent() + (1 << 20));
@@ -109,7 +116,7 @@ static void start(bool all) {
 }
 
 static void report_area(FILE *f, Area *a, bool render) {
-    uint16_t *c = render ? a->render : a->logic;
+    uint8_t *c = render ? a->render : a->logic;
     fprintf(f, "\n== %s written by %s\n", a->name, render ? "Render" : "logic ticks");
     size_t i = 0;
     unsigned ranges = 0;

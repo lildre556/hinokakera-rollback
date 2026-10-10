@@ -84,8 +84,8 @@ static bool lockstep_now(void) {
     if (frame_mode() != MODE_BATTLE) {
         return true;
     }
-    uint8_t *battle = APP_PTR(frame_app(), APP_SCENE_BATTLE);
-    return !battle || *(int32_t *)(battle + 0x68) == 7;
+    uint8_t *battle = game_battle(frame_app());
+    return !battle || *(int32_t *)(battle + BATTLE_STATE) == 7;
 }
 
 static int confirmed_frame(void) {
@@ -116,47 +116,36 @@ static uint32_t fnv32(uint32_t h, const void *p, size_t n) {
     return h;
 }
 
-static uint32_t state_hash(const Snap *s) {
-    uint32_t h = 2166136261u, parts[8] = {0};
-    size_t n;
-    const uint8_t *app = snap_region(s, "app", &n);
-    // Match flow (0x2abe8..0x2adb4) and the frame timers (0x2b95c..): not the
-    // per-player config or records in between.
+// Hash of the live state (called right after saving frame s->frame, so it is that frame's).
+static void state_hash(Snap *s) {
     const uint32_t seed = 2166136261u;
-    parts[0] = fnv32(seed, app + (0x2abe8 - 0x2a6d0), 0x2adb4 - 0x2abe8);
-    // Battle results, mode, timers; not 0x2b99c (per machine, unused by logic).
-    parts[1] = fnv32(seed, app + (0x2b95c - 0x2a6d0), 0x2b99c - 0x2b95c);
-    parts[1] = fnv32(parts[1], app + (0x2b9a0 - 0x2a6d0), 0x2b9b4 - 0x2b9a0);
-    const uint8_t *p = snap_region(s, "input", &n);
-    parts[2] = fnv32(seed, p, n);
-    h = fnv32(fnv32(fnv32(h, &parts[0], 4), &parts[1], 4), &parts[2], 4);
-    p = snap_region(s, "rng", &n);
-    parts[3] = *(const uint32_t *)(p + 8);
-    h = fnv32(h, p + 8, 4);
-    p = snap_region(s, "holdrand", &n);
-    parts[4] = *(const uint32_t *)p;
-    h = fnv32(h, p, n);
-    p = snap_region(s, "replay", &n);
-    parts[5] = *(const uint32_t *)(p + 0x3c);
-    h = fnv32(h, p + 0x3c, 4);
-    // Both fighters' life and position, read from the saved battle arena.
-    void *app_live = frame_app();
-    const uint8_t *battle = snap_arena_ptr(s, app_live ? APP_PTR(app_live, APP_SCENE_BATTLE) : NULL);
+    uint32_t h = seed, parts[8] = {0};
+    void *app = frame_app();
+    uint8_t *sys = game_sys(app);
+    uint8_t *input = game_input(app);
+    parts[0] = APP_U32(app, APP_TICKS);
+    parts[1] = fnv32(seed, input + INPUT_REC, INPUT_REC_SIZE);
+    parts[2] = G_RNG ? G_RNG[2] : 0;
+    parts[3] = frame_holdrand() ? *frame_holdrand() : 0;
+    // Round frame counter, round/win state of the match.
+    parts[4] = fnv32(fnv32(seed, sys + 0x37c, 4), sys + 0x388, 8);
+    // Battle state and its timer, both fighters' life and position.
+    const uint8_t *battle = game_battle(app);
     if (battle) {
+        parts[5] = fnv32(fnv32(seed, battle + BATTLE_STATE, 4), battle + 0x14, 4);
         for (int i = 0; i < 2; i++) {
-            const uint8_t *f = snap_arena_ptr(s, *(void *const *)(battle + 0x20 + i * 4));
+            const uint8_t *f = *(const uint8_t *const *)(battle + BATTLE_FIGHTER + i * 4);
             if (f) {
-                h = fnv32(h, f + 0x52c, 4);
-                h = fnv32(h, f + 0x448, 12);
-                parts[6 + i] = fnv32(fnv32(2166136261u, f + 0x52c, 4), f + 0x448, 12);
+                parts[6 + i] = fnv32(fnv32(seed, f + FIGHTER_LIFE, 4), f + FIGHTER_POS, 12);
             }
         }
     }
-#ifdef HINOROLL_HARNESS
-    log_printf("state frame %d: match %08x timers %08x input %08x rng %u holdrand %08x replay %u fighters %08x %08x", s->frame,
-               parts[0], parts[1], parts[2], parts[3], parts[4], parts[5], parts[6], parts[7]);
-#endif
-    return h;
+    for (int i = 0; i < 8; i++) {
+        h = fnv32(h, &parts[i], 4);
+    }
+    memcpy(s->hash_parts, parts, sizeof parts);
+    s->hash = h;
+    s->hashed = true;
 }
 
 static void store_hash(FrameHash *table, int frame, uint32_t hash) {
@@ -205,13 +194,16 @@ static void check_state(int confirmed) {
         if (s->frame != f) {
             continue;
         }
-        size_t n;
-        const uint8_t *app = snap_region(s, "app", &n);
-        if (*(const uint32_t *)(app + (APP_MODE - 0x2a6d0)) != MODE_BATTLE) {
+        if (!s->battle || !s->hashed) {
             last_hashed = f;
             continue;
         }
-        uint32_t h = state_hash(s);
+        uint32_t h = s->hash;
+#ifdef HINOROLL_HARNESS
+        const uint32_t *pt = s->hash_parts;
+        log_printf("state frame %d: ticks %08x input %08x rng %u holdrand %08x match %08x battle %08x fighters %08x %08x",
+                   f, pt[0], pt[1], pt[2], pt[3], pt[4], pt[5], pt[6], pt[7]);
+#endif
         store_hash(local_hashes, f, h);
         send_hash(f, h);
         compare_hashes(f);
@@ -227,6 +219,9 @@ static bool __cdecl cb_begin_game(const char *game) {
 static bool __cdecl cb_save(unsigned char **buffer, int *len, int *checksum, int frame) {
     Snap *s = ring[frame % RING];
     snap_save(s, frame);
+    if (s->battle && frame % DESYNC_EVERY == 0) {
+        state_hash(s);
+    }
     int *token = malloc(sizeof(int));
     *token = frame;
     *buffer = (unsigned char *)token;
@@ -351,6 +346,9 @@ static int driver(void *app) {
                 uint16_t in[2] = {ring_inputs[end_frame % RING][0], ring_inputs[end_frame % RING][1]};
                 run(in, false);
                 snap_save(ring[cur % RING], cur);
+                if (ring[cur % RING]->battle && cur % DESYNC_EVERY == 0) {
+                    state_hash(ring[cur % RING]);
+                }
                 log_printf("netplay: battle ended on frame %d", end_frame);
             } else {
                 end_pending = false;
@@ -382,6 +380,72 @@ static int driver(void *app) {
     ggpo_advance_frame(gs);
     local_added = false;
     return 0;
+}
+
+// ---- what both games must agree on outside battles ----
+// The title menu online: no attract demo (it would start a battle on its
+// own), and only the two-player modes: VS Human, Training, Watch. Arcade and
+// VS Com work on records and unlocks after each battle, the rest reads or
+// writes local files or is the game's own netplay. Both games see the same
+// inputs, so both refuse the same presses.
+static const bool offline_only[11] = {
+    [0] = true, [1] = true, [3] = true, [6] = true, [7] = true, [8] = true, [9] = true, [10] = true,
+};
+
+static void title_filter(void *title, bool before) {
+    if (!before) {
+        return;
+    }
+    int32_t state = (int32_t)PTR_U32(title, TITLE_STATE);
+    int32_t *idle = (int32_t *)((uint8_t *)title + TITLE_IDLE);
+    if (state == 1 && *idle > 500) {
+        // "Press start": the counter runs one behind +0x18 (the base scene's fade length).
+        *idle -= 300;
+        *(int32_t *)((uint8_t *)title + 0x18) -= 300;
+    } else if (state == 2 && *idle > 500) {
+        *idle = 0;
+    }
+    int32_t item = (int32_t)PTR_U32(title, TITLE_ITEM);
+    uint8_t *input = game_input(frame_app());
+    if (state == 2 && input && item >= 0 && item < 11 && offline_only[item]) {
+        for (int p = 0; p < 2; p++) {
+            *(int32_t *)(input + INPUT_REC + p * 0xa0 + 4 * 0x10 + 8) = 0;  // A: no "pressed" edge
+        }
+    }
+}
+
+// Unlocks, records and the select screens' starting picks come from each
+// player's record.dat and story save: online both games use the same:
+// empty records, everything unlocked (all 13 characters with their 4
+// colours), default picks. (record.dat isn't saved online, see frame.c.)
+static void same_records(void) {
+    uint8_t *sys = game_sys(frame_app());
+    if (!sys) {
+        return;
+    }
+    // FUN_0049a260's layout: +0x490 version, +0x494.. per-character records,
+    // +0xee8.. last picks, +0xf0c (20) and +0xf5c (100) more counters.
+    memset(sys + 0x494, 0, 0xee8 - 0x494);
+    memset(sys + 0xf0c, 0, 20 * 4);
+    memset(sys + 0xf5c, 0, 100 * 4);
+    PTR_U32(sys, 0x100) = 13;
+    for (int i = 0; i < 13; i++) {
+        PTR_U32(sys, 0x104 + i * 4) = 1;
+        PTR_U32(sys, 0x138 + i * 4) = 4;
+    }
+    for (int p = 0; p < 2; p++) {
+        PTR_U32(sys, 0xee8 + p * 4) = (uint32_t)p;  // last characters, colours...
+        PTR_U32(sys, 0xef0 + p * 4) = 0;
+        PTR_U32(sys, 0xef8 + p * 4) = 0;
+        PTR_U32(sys, 0x318 + p * 0x28) = (uint32_t)p;  // ...and the copy the select screen starts from
+        PTR_U32(sys, 0x31c + p * 0x28) = 0;
+        PTR_U32(sys, 0x320 + p * 0x28) = 0;
+    }
+    PTR_U32(sys, 0xf00) = 0;  // stage, music
+    PTR_U32(sys, 0xf04) = 0;
+    PTR_U32(sys, 0xf08) = 0;
+    PTR_U32(sys, 0x360) = 0;
+    PTR_U32(sys, 0x364) = 0;
 }
 
 bool netplay_start(const NetplaySetup *s) {
@@ -446,6 +510,8 @@ bool netplay_start(const NetplaySetup *s) {
     memset(remote_hashes, 0xff, sizeof remote_hashes);
     second_start = GetTickCount();
     set_status("waiting for the opponent");
+    same_records();
+    frame_set_title_filter(title_filter);
     frame_set_battle_end_gate(battle_end_gate);
     frame_set_driver(driver);
     frame_keep_active(true);
@@ -464,6 +530,7 @@ void netplay_stop(const char *why) {
     gs = NULL;
     frame_set_driver(NULL);
     frame_set_battle_end_gate(NULL);
+    frame_set_title_filter(NULL);
     res_set_journal(false);
     ggpo_close_session(g);
     snprintf(status_text, sizeof status_text, "offline: %s", why);

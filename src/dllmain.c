@@ -4,13 +4,16 @@
 #include "harness.h"
 #include "heap.h"
 #include "hooks.h"
+#include "game.h"
 #include "log.h"
 
 void crash_install(void);
 void overlay_install(void);
 void effects_install(void);
 void padui_install(void);
+void audio_install(void);
 #include "pads.h"
+#include "window.h"
 
 typedef HRESULT(WINAPI *DirectInput8Create_t)(HINSTANCE, DWORD, REFIID, LPVOID *, LPUNKNOWN);
 static DirectInput8Create_t real_create;
@@ -46,10 +49,10 @@ HRESULT WINAPI proxy_DirectInput8Create(HINSTANCE inst, DWORD version, REFIID ii
 }
 
 static bool is_game(void) {
-    // Only hook hinokakera.exe ver.3.00 (the addresses are for that build).
+    // Only hook the Chaotic Eclipse ver.1.01 hinokakera.exe (the addresses are for that build).
     const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)GetModuleHandleA(NULL);
     const IMAGE_NT_HEADERS *nt = (const IMAGE_NT_HEADERS *)((const char *)dos + dos->e_lfanew);
-    return nt->FileHeader.TimeDateStamp == 0x4797503bu && nt->OptionalHeader.ImageBase == 0x400000;
+    return nt->FileHeader.TimeDateStamp == GAME_TIMESTAMP && nt->OptionalHeader.ImageBase == 0x400000;
 }
 
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
@@ -57,7 +60,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
         DisableThreadLibraryCalls(inst);
         log_init();
         if (!is_game()) {
-            log_printf("not hinokakera.exe ver.3.00 (2008-01-23); the mod stays off");
+            log_printf("not hinokakera.exe of Hinokakera Chaotic Eclipse ver.1.01 (2011-08-30); the mod stays off");
             return TRUE;
         }
         log_printf("hinoroll loaded");
@@ -66,6 +69,8 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
             heap_install();
             frame_install();
             overlay_install();
+            window_install();
+            audio_install();
             effects_install();
             pads_install();
             padui_install();

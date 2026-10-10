@@ -38,14 +38,14 @@ static int pending_life = -1;
 static int no_check_until;
 
 static void apply_life(void *app) {
-    uint8_t *battle = APP_PTR(app, APP_SCENE_BATTLE);
+    uint8_t *battle = game_battle(app);
     if (!battle) {
         return;
     }
     for (int i = 0; i < 2; i++) {
-        uint8_t *f = *(uint8_t **)(battle + 0x20 + i * 4);
-        if (f && *(int32_t *)(f + 0x52c) > pending_life) {
-            *(int32_t *)(f + 0x52c) = pending_life;
+        uint8_t *f = *(uint8_t **)(battle + BATTLE_FIGHTER + i * 4);
+        if (f && *(int32_t *)(f + FIGHTER_LIFE) > pending_life) {
+            *(int32_t *)(f + FIGHTER_LIFE) = pending_life;
         }
     }
     pending_life = -1;
@@ -127,31 +127,81 @@ static void compare_traces(int f, int resim_len) {
     }
 }
 
+// Which battle-logic allocation last held a now free address (from the traces).
+static void explain_free(uintptr_t addr, char *out, size_t n) {
+    for (int back = 0; back < RING; back++) {
+        int f = frame - 1 - back;
+        if (f < 0) {
+            break;
+        }
+        const HeapTraceEntry *t = traces[f % RING];
+        int len = trace_lens[f % RING] < TRACE_CAP ? trace_lens[f % RING] : TRACE_CAP;
+        for (int i = len - 1; i >= 0; i--) {
+            if ((t[i].op == 'A' || t[i].op == 'R') && addr >= t[i].ptr && addr < t[i].ptr + t[i].size) {
+                snprintf(out, n, ", was %u bytes at %08x from %06x/%06x frame %d", t[i].size, (unsigned)t[i].ptr,
+                         (unsigned)t[i].site, (unsigned)t[i].site2, f);
+                return;
+            }
+        }
+    }
+}
+
+static void report_statics_diff(const uint8_t *a, const uint8_t *b) {
+    // Which outside regions differ (by name).
+    static const char *names[] = {"app", "sys", "input", "rng", "holdrand", "replay", "camera", "transforms"};
+    for (unsigned i = 0; i < sizeof names / sizeof names[0]; i++) {
+        size_t n;
+        const uint8_t *ra = snap_region(step_snap, names[i], &n);
+        if (!ra) {
+            continue;
+        }
+        size_t off = (size_t)(ra - step_snap->statics);
+        if (memcmp(a + off, b + off, n) != 0) {
+            for (size_t k = 0; k < n; k++) {
+                if (a[off + k] != b[off + k]) {
+                    char line[160];
+                    snprintf(line, sizeof line, "  %s+%x differs (%02x vs %02x)", names[i], (unsigned)k, a[off + k],
+                             b[off + k]);
+                    report_line(line);
+                    break;
+                }
+            }
+        }
+    }
+}
+
 static void check(void) {
-    snap_save(orig_snap, frame);
+    snap_capture(orig_snap, frame);
     int from = frame - depth;
     snap_load(ring[from % RING]);
     res_rollback(from);
-    bool reported_step = false;
+    int first_step = -1;
+    bool first_step_statics = false;
+    static uint8_t *old_statics, *step_resim_statics;
+    if (!old_statics) {
+        old_statics = malloc(snap_statics_size());
+        step_resim_statics = malloc(snap_statics_size());
+    }
     for (int f = from; f < frame; f++) {
         if (f > from) {
-            // First frame where the re-run differs from the original run.
-            if (!reported_step) {
-                snap_save(step_snap, f);
-                if (memcmp(step_snap->statics, ring[f % RING]->statics, snap_statics_size()) != 0 ||
-                    step_snap->arena_len != ring[f % RING]->arena_len ||
-                    memcmp(step_snap->arena, ring[f % RING]->arena, step_snap->arena_len) != 0) {
-                    if (snap_diff(ring[f % RING], step_snap, 0, report_line, render_mask) > 0 && failures < 5) {
-                        reported_step = true;
-                        harness_reply("stress: re-run first differs before frame %d:", f);
-                        log_printf("stress: re-run first differs before frame %d:", f);
-                        snap_diff(ring[f % RING], step_snap, 12, report_line, render_mask);
-                    }
+            // The re-run replaces the saved states (like GGPO does): the old ones
+            // refer to resources the rollback just released. Comparing the
+            // re-saved state with the original one shows the first frame where
+            // the re-run went another way.
+            Snap *r = ring[f % RING];
+            uint32_t old_sum = r->arena_sum;
+            memcpy(old_statics, r->statics, snap_statics_size());
+            snap_save(r, f);
+            r->arena_sum = snap_live_checksum(render_mask, render_mask_len);
+            bool statics_differ = memcmp(old_statics, r->statics, snap_statics_size()) != 0;
+            if (first_step < 0 && (statics_differ || old_sum != r->arena_sum)) {
+                first_step = f;
+                first_step_statics = statics_differ;
+                if (statics_differ) {
+                    memcpy(step_snap->statics, old_statics, snap_statics_size());
+                    memcpy(step_resim_statics, r->statics, snap_statics_size());
                 }
             }
-            // The re-run replaces the saved states (like GGPO does): the old ones
-            // refer to resources the rollback just released.
-            snap_save(ring[f % RING], f);
         }
         res_set_frame(f);
         heap_trace(resim_trace, TRACE_CAP);
@@ -162,7 +212,7 @@ static void check(void) {
         memcpy(traces[f % RING], resim_trace, sizeof resim_trace);
         trace_lens[f % RING] = n;
     }
-    snap_save(resim_snap, frame);
+    snap_capture(resim_snap, frame);
     checks++;
     if (verbose || memcmp(orig_snap->statics, resim_snap->statics, snap_statics_size()) != 0 ||
         orig_snap->arena_len != resim_snap->arena_len || memcmp(orig_snap->arena, resim_snap->arena, orig_snap->arena_len) != 0) {
@@ -172,6 +222,13 @@ static void check(void) {
             if (failures <= 5) {
                 harness_reply("stress MISMATCH at frame %d (rolled back %d), %d ranges:", frame, depth, n);
                 log_printf("stress MISMATCH at frame %d (rolled back %d), %d ranges:", frame, depth, n);
+                if (first_step >= 0) {
+                    log_printf("  the re-run first differed before frame %d (%s)", first_step,
+                               first_step_statics ? "outside the arena" : "arena checksum");
+                    if (first_step_statics) {
+                        report_statics_diff(step_snap->statics, step_resim_statics);
+                    }
+                }
                 snap_diff(orig_snap, resim_snap, (int)max_report, report_line, render_mask);
             }
         }
@@ -192,6 +249,7 @@ static int driver(void *app) {
         in_battle = true;
         frame = 0;
         no_check_until = 0;
+        snap_reset();  // frame numbers start over
         res_set_journal(true);
         if (render_mask) {
             memset(render_mask, 0, render_mask_len);
@@ -201,6 +259,7 @@ static int driver(void *app) {
         apply_life(app);
     }
     snap_save(ring[frame % RING], frame);
+    ring[frame % RING]->arena_sum = snap_live_checksum(render_mask, render_mask_len);
     inputs[frame % RING][0] = p1;
     inputs[frame % RING][1] = p2;
     res_set_frame(frame);
@@ -216,8 +275,11 @@ static int driver(void *app) {
     if (++ticks_since_report >= 600) {
         ticks_since_report = 0;
         ResStats rs = res_stats();
-        log_printf("stress: frame %d, %u checks, %u failures; journal %u, creates %u, deferred %u, done %u, undone %u",
-                   frame, checks, failures, rs.journal_len, rs.creates, rs.releases_deferred, rs.releases_done, rs.undone);
+        SnapStats ss = snap_stats();
+        log_printf("stress: frame %d, %u checks, %u failures; journal %u, creates %u, deferred %u, done %u, undone %u; "
+                   "pages per save %u (max %u), page journal %u KB",
+                   frame, checks, failures, rs.journal_len, rs.creates, rs.releases_deferred, rs.releases_done, rs.undone,
+                   ss.pages_last_save, ss.pages_max_save, (unsigned)(ss.journal_bytes >> 10));
     }
     return r;
 }
@@ -278,6 +340,7 @@ static int handle(const char *cmd, const char *args) {
 }
 
 void stress_install(void) {
+    snap_set_free_explainer(explain_free);
     harness_add_handler(handle);
     frame_set_observer(observe);
 }

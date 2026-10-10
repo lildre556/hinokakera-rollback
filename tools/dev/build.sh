@@ -23,7 +23,7 @@ fi
 if [ "${1:-}" = "--deploy" ]; then
     taskkill //F //IM hinokakera.exe >/dev/null 2>&1 || true
     sleep 0.5
-    for d in ${HINO_DEPLOY_DIRS:-/e/Hinokakera/dev /e/Hinokakera/dev2}; do
+    for d in ${HINO_DEPLOY_DIRS:-/e/Hinokakera/ce_dev /e/Hinokakera/ce_dev2}; do
         [ -d "$d" ] && cp $BUILD/dinput8.dll "$d/dinput8.dll" && echo "deployed to $d"
     done
 fi

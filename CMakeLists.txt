@@ -51,6 +51,8 @@ add_library(hinoroll SHARED
     src/session.c
     src/stun.c
     src/overlay.c
+    src/window.c
+    src/audio.c
     src/dinput8.def
 )
 if(HINOROLL_HARNESS)
@@ -61,7 +63,7 @@ target_include_directories(hinoroll PRIVATE src third_party/dlmalloc)
 set_target_properties(hinoroll PROPERTIES OUTPUT_NAME dinput8 PREFIX "")
 # dinput8/dxguid only for c_dfDIJoystick and GUIDs: the system DirectInput8Create is
 # loaded at run time (this DLL is dinput8.dll itself).
-target_link_libraries(hinoroll PRIVATE minhook ggpo ws2_32 winmm iphlpapi dinput8 dxguid)
+target_link_libraries(hinoroll PRIVATE minhook ggpo ws2_32 winmm iphlpapi dinput8 dxguid ole32)
 target_link_options(hinoroll PRIVATE -static -static-libgcc -static-libstdc++)
 # -fno-indirect-inlining: calls into engine code at fixed addresses through
 # inlined helpers must not be treated as unreachable (see the KOF mod notes).

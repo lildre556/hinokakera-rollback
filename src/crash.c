@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <windows.h>
 
+#include "game.h"
 #include "log.h"
 
 static int logged;
@@ -41,12 +42,39 @@ static void dump(EXCEPTION_POINTERS *ep, const char *kind) {
             break;
         }
         uintptr_t v = sp[i];
-        if (v >= 0x401000 && v < 0x4ba2d4) {
+        if (v >= IMAGE_TEXT_START && v < IMAGE_TEXT_END) {
             n += snprintf(line + n, sizeof line - n, " %06x", (unsigned)v);
             found++;
         }
     }
     log_printf("  game addresses on the stack:%s", line);
+    // Return addresses into the mod and system DLLs too (module+offset).
+    HMODULE self = NULL;
+    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       (LPCSTR)dump, &self);
+    n = 0;
+    line[0] = 0;
+    for (int i = 0, found = 0; i < 256 && found < 12; i++) {
+        if (IsBadReadPtr(sp + i, 4)) {
+            break;
+        }
+        uintptr_t v = sp[i];
+        HMODULE m = NULL;
+        if (v < 0x10000 || (v >= IMAGE_TEXT_START && v < IMAGE_TEXT_END) ||
+            !GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                (LPCSTR)v, &m) || !m) {
+            continue;
+        }
+        const uint8_t *code = (const uint8_t *)v;
+        if (IsBadReadPtr(code - 6, 6) || !(code[-5] == 0xe8 || (code[-2] == 0xff) || (code[-3] == 0xff) || (code[-6] == 0xff))) {
+            continue;  // not right after a call
+        }
+        char name[64];
+        module_of(v, name, sizeof name);
+        n += snprintf(line + n, sizeof line - n, " %s%s", m == self ? "MOD:" : "", name);
+        found++;
+    }
+    log_printf("  DLL return addresses:%s", line);
 }
 
 static LONG CALLBACK veh(EXCEPTION_POINTERS *ep) {
@@ -59,7 +87,7 @@ static LONG CALLBACK veh(EXCEPTION_POINTERS *ep) {
     // IsBadReadPtr and friends fault on purpose inside kernelbase; only report game/D3D/our code.
     char mod[128];
     module_of(eip, mod, sizeof mod);
-    bool interesting = (eip >= 0x400000 && eip < 0x4e3000) || strncmp(mod, "d3d", 3) == 0 ||
+    bool interesting = (eip >= 0x400000 && eip < IMAGE_DATA_END) || strncmp(mod, "d3d", 3) == 0 ||
                        strncmp(mod, "dinput8.dll", 11) == 0 || strncmp(mod, "dsound", 6) == 0;
     if (interesting && logged < 4) {
         logged++;
@@ -89,7 +117,7 @@ static void __cdecl hk_game_msg(int show, int error, const char *text) {
 bool hook_code(uintptr_t addr, void *detour, void **orig, const char *name);
 
 void crash_install(void) {
-    hook_code(0x488860, (void *)hk_game_msg, (void **)&orig_game_msg, "game messages");
+    hook_code(ADDR_GAME_MSG, (void *)hk_game_msg, (void **)&orig_game_msg, "game messages");
     AddVectoredExceptionHandler(1, veh);
     SetUnhandledExceptionFilter(unhandled);
 }

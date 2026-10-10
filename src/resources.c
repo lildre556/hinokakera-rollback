@@ -9,13 +9,11 @@
 #include "hooks.h"
 #include "log.h"
 
-// Texture cache (app+APP_SND -> +4): 999 entries of 0x78 bytes from +0x20:
-// {IDirect3DTexture8 *tex; char name[...] (+0x04); ... refcount (+0x68); size (+0x6c)}.
-#define TEXCACHE_ACQUIRE 0x433d40u  // thiscall(cache, uint *out_idx, const char *name) -> HRESULT
-#define TEXCACHE_RELEASE 0x434de0u  // thiscall(cache, int idx)
-#define TEX_ENTRY(cache, idx) ((uint8_t *)(cache) + (idx) * 0x78)
-#define TEX_PTR(cache, idx) (*(void **)(TEX_ENTRY(cache, idx) + 0x20))
-#define TEX_REFS(cache, idx) (*(int32_t *)(TEX_ENTRY(cache, idx) + 0x88))
+// Texture cache (the renderer's): 999 entries of 0x78 bytes, index 1..:
+// {IDirect3DTexture9 *tex (+0x1c); char name[] (+0x20); ... refcount (+0x84); size (+0x88)}.
+#define TEX_ENTRY(cache, idx) ((uint8_t *)(cache) + (idx) * TEX_ENTRY_SIZE)
+#define TEX_PTR(cache, idx) (*(void **)(TEX_ENTRY(cache, idx) + TEX_PTR_OFF))
+#define TEX_REFS(cache, idx) (*(int32_t *)(TEX_ENTRY(cache, idx) + TEX_REFS_OFF))
 #define TEX_SLOTS 999
 
 enum { OP_CREATE, OP_ADDREF, OP_RELEASE, OP_TEX_ACQUIRE, OP_TEX_RELEASE };
@@ -170,37 +168,39 @@ static void created(HRESULT hr, void **out) {
     }
 }
 
-typedef HRESULT(WINAPI *create_tex_fn)(void *, UINT, UINT, UINT, DWORD, UINT, UINT, void **);
-typedef HRESULT(WINAPI *create_vol_fn)(void *, UINT, UINT, UINT, UINT, DWORD, UINT, UINT, void **);
-typedef HRESULT(WINAPI *create_cube_fn)(void *, UINT, UINT, DWORD, UINT, UINT, void **);
-typedef HRESULT(WINAPI *create_buf_fn)(void *, UINT, DWORD, DWORD, UINT, void **);
+// Direct3D 9: every Create* takes a trailing shared-handle pointer.
+typedef HRESULT(WINAPI *create_tex_fn)(void *, UINT, UINT, UINT, DWORD, UINT, UINT, void **, void *);
+typedef HRESULT(WINAPI *create_vol_fn)(void *, UINT, UINT, UINT, UINT, DWORD, UINT, UINT, void **, void *);
+typedef HRESULT(WINAPI *create_cube_fn)(void *, UINT, UINT, DWORD, UINT, UINT, void **, void *);
+typedef HRESULT(WINAPI *create_buf_fn)(void *, UINT, DWORD, DWORD, UINT, void **, void *);
 static create_tex_fn orig_create_tex;
 static create_vol_fn orig_create_vol;
 static create_cube_fn orig_create_cube;
 static create_buf_fn orig_create_vb, orig_create_ib;
 
-static HRESULT WINAPI hk_create_tex(void *d, UINT w, UINT h, UINT l, DWORD u, UINT f, UINT p, void **out) {
-    HRESULT hr = orig_create_tex(d, w, h, l, u, f, p, out);
+static HRESULT WINAPI hk_create_tex(void *d, UINT w, UINT h, UINT l, DWORD u, UINT f, UINT p, void **out, void *sh) {
+    HRESULT hr = orig_create_tex(d, w, h, l, u, f, p, out, sh);
     created(hr, out);
     return hr;
 }
-static HRESULT WINAPI hk_create_vol(void *d, UINT w, UINT h, UINT dd, UINT l, DWORD u, UINT f, UINT p, void **out) {
-    HRESULT hr = orig_create_vol(d, w, h, dd, l, u, f, p, out);
+static HRESULT WINAPI hk_create_vol(void *d, UINT w, UINT h, UINT dd, UINT l, DWORD u, UINT f, UINT p, void **out,
+                                    void *sh) {
+    HRESULT hr = orig_create_vol(d, w, h, dd, l, u, f, p, out, sh);
     created(hr, out);
     return hr;
 }
-static HRESULT WINAPI hk_create_cube(void *d, UINT e, UINT l, DWORD u, UINT f, UINT p, void **out) {
-    HRESULT hr = orig_create_cube(d, e, l, u, f, p, out);
+static HRESULT WINAPI hk_create_cube(void *d, UINT e, UINT l, DWORD u, UINT f, UINT p, void **out, void *sh) {
+    HRESULT hr = orig_create_cube(d, e, l, u, f, p, out, sh);
     created(hr, out);
     return hr;
 }
-static HRESULT WINAPI hk_create_vb(void *d, UINT len, DWORD u, DWORD fvf, UINT p, void **out) {
-    HRESULT hr = orig_create_vb(d, len, u, fvf, p, out);
+static HRESULT WINAPI hk_create_vb(void *d, UINT len, DWORD u, DWORD fvf, UINT p, void **out, void *sh) {
+    HRESULT hr = orig_create_vb(d, len, u, fvf, p, out, sh);
     created(hr, out);
     return hr;
 }
-static HRESULT WINAPI hk_create_ib(void *d, UINT len, DWORD u, DWORD fmt, UINT p, void **out) {
-    HRESULT hr = orig_create_ib(d, len, u, fmt, p, out);
+static HRESULT WINAPI hk_create_ib(void *d, UINT len, DWORD u, DWORD fmt, UINT p, void **out, void *sh) {
+    HRESULT hr = orig_create_ib(d, len, u, fmt, p, out, sh);
     created(hr, out);
     return hr;
 }
@@ -270,13 +270,40 @@ static HRESULT WINAPI hk_get_xf(void *d, UINT type, void *m) {
 // the game's loop then neither renders nor runs logic. Logged so it can be told
 // apart from a hang.
 typedef HRESULT(WINAPI *tcl_fn)(void *);
+typedef HRESULT(WINAPI *reset_fn)(void *, void *);
+static reset_fn orig_reset;
+static unsigned resets;
 static tcl_fn orig_tcl;
 static HRESULT last_tcl;
+// Test builds: pretend the device is lost for a while, then needs a Reset
+// (what alt-tabbing out of exclusive fullscreen does), without touching the screen.
+static volatile LONG sim_lost_ms_until;
+static volatile LONG sim_reset_pending;
+
+void res_simulate_device_loss(int ms) {
+    sim_lost_ms_until = (LONG)(GetTickCount() + (DWORD)ms);
+    sim_reset_pending = 1;
+}
+
 static HRESULT WINAPI hk_tcl(void *d) {
     HRESULT hr = orig_tcl(d);
+    if (hr == 0 && sim_reset_pending) {
+        hr = (LONG)(GetTickCount() - (DWORD)sim_lost_ms_until) < 0 ? (HRESULT)0x88760868 /* DEVICELOST */
+                                                                     : (HRESULT)0x88760869; /* DEVICENOTRESET */
+    }
     if (hr != last_tcl) {
         log_printf("device: TestCooperativeLevel %08lx -> %08lx", (unsigned long)last_tcl, (unsigned long)hr);
         last_tcl = hr;
+    }
+    return hr;
+}
+
+static HRESULT WINAPI hk_reset(void *d, void *pp) {
+    HRESULT hr = orig_reset(d, pp);
+    resets++;
+    log_printf("device: Reset -> %08lx (%u resets, %u live objects)", (unsigned long)hr, resets, known_count);
+    if (SUCCEEDED(hr)) {
+        sim_reset_pending = 0;
     }
     return hr;
 }
@@ -317,7 +344,7 @@ static void hook_class(IUnknown *obj, const char *name) {
 }
 
 // ---- texture cache hooks ----
-typedef int(THISCALL *tex_acquire_fn)(void *cache, uint32_t *out, const char *name);
+typedef int(THISCALL *tex_acquire_fn)(void *cache, uint32_t *out, const char *name, int flag);
 typedef int(THISCALL *tex_release_fn)(void *cache, int idx);
 static tex_acquire_fn orig_tex_acquire;
 static tex_release_fn orig_tex_release;
@@ -338,14 +365,14 @@ static void tex_release_real(void *cache, int idx) {
     in_texcache--;
 }
 
-static int THISCALL hk_tex_acquire(void *cache, uint32_t *out, const char *name) {
+static int THISCALL hk_tex_acquire(void *cache, uint32_t *out, const char *name, int flag) {
     bool j = journaling_now();
     in_texcache++;
     // Loading a texture reads the file into scratch buffers; a re-run finds it
     // cached instead. Keep that scratch out of the battle arena so both runs
     // leave the arena identical.
     heap_route_push(false);
-    int r = orig_tex_acquire(cache, out, name);
+    int r = orig_tex_acquire(cache, out, name, flag);
     heap_route_pop();
     in_texcache--;
     if (r >= 0 && out && *out > 0 && *out <= TEX_SLOTS) {
@@ -453,32 +480,34 @@ void res_install(void *device) {
     }
     done = true;
     void **vt = *(void ***)device;
-    hook_code((uintptr_t)vt[20], (void *)hk_create_tex, (void **)&orig_create_tex, "CreateTexture");
-    hook_code((uintptr_t)vt[21], (void *)hk_create_vol, (void **)&orig_create_vol, "CreateVolumeTexture");
-    hook_code((uintptr_t)vt[22], (void *)hk_create_cube, (void **)&orig_create_cube, "CreateCubeTexture");
-    hook_code((uintptr_t)vt[23], (void *)hk_create_vb, (void **)&orig_create_vb, "CreateVertexBuffer");
-    hook_code((uintptr_t)vt[24], (void *)hk_create_ib, (void **)&orig_create_ib, "CreateIndexBuffer");
+    // IDirect3DDevice9 methods.
+    hook_code((uintptr_t)vt[23], (void *)hk_create_tex, (void **)&orig_create_tex, "CreateTexture");
+    hook_code((uintptr_t)vt[24], (void *)hk_create_vol, (void **)&orig_create_vol, "CreateVolumeTexture");
+    hook_code((uintptr_t)vt[25], (void *)hk_create_cube, (void **)&orig_create_cube, "CreateCubeTexture");
+    hook_code((uintptr_t)vt[26], (void *)hk_create_vb, (void **)&orig_create_vb, "CreateVertexBuffer");
+    hook_code((uintptr_t)vt[27], (void *)hk_create_ib, (void **)&orig_create_ib, "CreateIndexBuffer");
     hook_code((uintptr_t)vt[3], (void *)hk_tcl, (void **)&orig_tcl, "TestCooperativeLevel");
-    hook_code((uintptr_t)vt[37], (void *)hk_set_xf, (void **)&orig_set_xf, "SetTransform");
-    hook_code((uintptr_t)vt[38], (void *)hk_get_xf, (void **)&orig_get_xf, "GetTransform");
+    hook_code((uintptr_t)vt[16], (void *)hk_reset, (void **)&orig_reset, "Reset");
+    hook_code((uintptr_t)vt[44], (void *)hk_set_xf, (void **)&orig_set_xf, "SetTransform");
+    hook_code((uintptr_t)vt[45], (void *)hk_get_xf, (void **)&orig_get_xf, "GetTransform");
     // One throwaway object of each kind gives each class's AddRef/Release.
     void *o = NULL;
-    if (SUCCEEDED(orig_create_vb(device, 64, 0, 2, 1, &o))) {
+    if (SUCCEEDED(orig_create_vb(device, 64, 0, 2, 1, &o, NULL))) {
         hook_class(o, "VB AddRef/Release");
     }
     o = NULL;
-    if (SUCCEEDED(orig_create_ib(device, 64, 0, 101 /* D3DFMT_INDEX16 */, 1, &o))) {
+    if (SUCCEEDED(orig_create_ib(device, 64, 0, 101 /* D3DFMT_INDEX16 */, 1, &o, NULL))) {
         hook_class(o, "IB AddRef/Release");
     }
     o = NULL;
-    if (SUCCEEDED(orig_create_tex(device, 4, 4, 1, 0, 21 /* A8R8G8B8 */, 1, &o))) {
+    if (SUCCEEDED(orig_create_tex(device, 4, 4, 1, 0, 21 /* A8R8G8B8 */, 1, &o, NULL))) {
         hook_class(o, "Texture AddRef/Release");
     }
     o = NULL;
-    if (SUCCEEDED(orig_create_cube(device, 4, 1, 0, 21, 1, &o))) {
+    if (SUCCEEDED(orig_create_cube(device, 4, 1, 0, 21, 1, &o, NULL))) {
         hook_class(o, "Cube AddRef/Release");
     }
-    hook_code(TEXCACHE_ACQUIRE, (void *)hk_tex_acquire, (void **)&orig_tex_acquire, "texcache acquire");
-    hook_code(TEXCACHE_RELEASE, (void *)hk_tex_release, (void **)&orig_tex_release, "texcache release");
+    hook_code(ADDR_TEXCACHE_ACQUIRE, (void *)hk_tex_acquire, (void **)&orig_tex_acquire, "texcache acquire");
+    hook_code(ADDR_TEXCACHE_RELEASE, (void *)hk_tex_release, (void **)&orig_tex_release, "texcache release");
     log_printf("res: hooked %d resource classes", class_count);
 }

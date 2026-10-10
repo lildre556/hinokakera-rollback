@@ -266,9 +266,11 @@ static void run_command(char *line) {
         bool ok = app && d3d_screenshot(APP_PTR(app, APP_DEVICE), path);
         harness_reply("shot %s %s", path, ok ? "ok" : "FAILED");
     } else if (strcmp(cmd, "app") == 0) {
-        void *ptd = TlsGetValue(*(DWORD *)0x4dac40);
-        harness_reply("app %p input %p battle %p rng %p net %p holdrand %p", app, app ? APP_PTR(app, APP_INPUT) : NULL,
-                      app ? APP_PTR(app, APP_SCENE_BATTLE) : NULL, (void *)G_RNG, G_NET, ptd ? (uint8_t *)ptd + 0x14 : NULL);
+        uint8_t *sys = game_sys(app);
+        harness_reply("app %p sys %p input %p scene %p battle %p rng %p net %p renderer %p holdrand %p", app, sys,
+                      game_input(app), app ? APP_PTR(app, APP_SCENE) : NULL, game_battle(app), (void *)G_RNG,
+                      sys ? PTR_PTR(sys, SYS_NET) : NULL, app ? APP_PTR(app, APP_RENDERER) : NULL,
+                      (void *)frame_holdrand());
     } else if (strcmp(cmd, "stats") == 0) {
         HeapStats s = heap_stats();
         harness_reply("heap main %u KB (peak %u KB, %u allocs) battle %u KB (peak %u KB, %u allocs) leaked frees %u reallocs %u",

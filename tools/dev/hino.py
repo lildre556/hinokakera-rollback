@@ -1,7 +1,7 @@
 """Python side of the harness: send commands to a running game and wait for replies.
 
     from hino import Game
-    g = Game()                 # E:/Hinokakera/dev (or HINO_DIR)
+    g = Game()                 # E:/Hinokakera/ce_dev (or HINO_DIR)
     g.cmd("ping")              # -> list of reply lines
     g.wait_mode(3)
     g.press(1, "a")            # one tap (2 frames) and wait for it to finish
@@ -10,7 +10,7 @@ import os
 import re
 import time
 
-DEFAULT_DIR = os.environ.get("HINO_DIR", r"E:\Hinokakera\dev")
+DEFAULT_DIR = os.environ.get("HINO_DIR", r"E:\Hinokakera\ce_dev")
 
 
 class Game:
@@ -45,9 +45,12 @@ class Game:
         raise TimeoutError(f"no reply to {lines} (want={want})")
 
     def mode(self):
-        r = self.cmd("mode")
-        m = re.search(r"mode (-?\d+)", r[-1])
-        return int(m.group(1)) if m else None
+        r = self.cmd("mode", want=r"\] mode -?\d+")
+        for line in reversed(r):
+            m = re.search(r"\] mode (-?\d+)", line)
+            if m:
+                return int(m.group(1))
+        return None
 
     def wait_mode(self, mode, timeout=60.0):
         end = time.time() + timeout

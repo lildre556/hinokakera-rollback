@@ -36,3 +36,5 @@ void *res_logic_state(size_t *len);
 void res_reset_logic_state(void);
 // A Direct3D object the game created through the device (an external handle).
 bool res_is_object(const void *p);
+// Test builds: the device reports lost for `ms`, then needs a Reset.
+void res_simulate_device_loss(int ms);

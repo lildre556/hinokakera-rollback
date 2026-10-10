@@ -15,8 +15,12 @@ def main():
     if "--item" in sys.argv:
         item = int(sys.argv[sys.argv.index("--item") + 1])
     g = Game()
-    to_menu_item(g, item)
-    g.wait_mode(4, timeout=30)
+    if g.mode() == 6:
+        print("battle")
+        return
+    if g.mode() not in (4, 5):
+        to_menu_item(g, item)
+        g.wait_mode(4, timeout=30)
     time.sleep(0.5)
     if "--chars" in sys.argv:
         i = sys.argv.index("--chars")

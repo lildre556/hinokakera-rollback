@@ -13,8 +13,8 @@ from hino import Game
 from mash import script
 from to_vs import to_menu_item
 
-P1_DIR = r"E:\Hinokakera\dev"
-P2_DIR = r"E:\Hinokakera\dev2"
+P1_DIR = r"E:\Hinokakera\ce_dev"
+P2_DIR = r"E:\Hinokakera\ce_dev2"
 
 
 def log_tail(d, n=400):
